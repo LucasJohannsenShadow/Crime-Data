@@ -1,0 +1,749 @@
+---
+title-block-banner: true
+title: "Analyse der Strafdelikte Chicagos mit Fokus auf Tötungsdelikte"
+author: "Lucas Johannsen"
+format: html
+embed-resources: true
+editor: visual
+lang: de
+date: "01.08.2023"
+reference-location: margin
+output:
+  html_document:
+    css: styles.css
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+      number_sections: true
+    fig_caption: true
+    fig-width: 10
+    fig-height: 6
+    theme: united
+    highlight: tango
+---
+
+Chicago ist eine Stadt in den Vereinigten Staaten von Amerika, die im Laufe der Jahre einen Ruf als Zentrum der Kriminalität erlangt hat. Die Kriminalitätsrate in Chicago ist in den letzten Jahren jedoch rückläufig. Trotzdem gibt es bestimmte Gebiete in der Stadt, die immer noch als besonders gefährlich gelten, insbesondere aufgrund von Bandenkriminalität und Drogenhandel.
+
+Im folgenden werden die Daten des [Chicago Data Portal](https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2) im Zeitraum von 2001 bis einschließlich 2022 untersucht und aufbereitet anhand von 15 Leitfragen.
+
+```{r}
+#| echo: false
+#| output: false
+if (!require(tidyverse)) {
+  install.packages(tidyverse)
+  library(tidyverse)
+}
+if (!require(scales)) {
+  install.packages(scales)
+  library(scales)
+}
+if (!require(gridExtra)) {
+  install.packages(gridExtra)
+  library(gridExtra)
+}
+if (!require(lubridate)) {
+  install.packages(lubridate)
+  library(lubridate)
+}
+if (!require(ggpmisc)) {
+  install.packages(ggpmisc)
+  library(ggpmisc)
+}
+if (!require(gganimate)) {
+  install.packages(gganimate)
+  library(gganimate)
+}
+if (!require(gifski)) {
+  install.packages(gifski)
+  library(gifski)
+}
+if (!require(ggridges)) {
+  install.packages(ggridges)
+  library(ggridges)
+}
+if (!require(here)) {
+  install.packages(here)
+  library(here)
+}
+if (!require(ggmap)) {
+  install.packages(ggmap)
+  library(ggmap)
+}
+if (!require(osmdata)) {
+  install.packages(osmdata)
+  library(osmdata)
+}
+if (!require(sf)) {
+  install.packages(sf)
+  library(sf)
+}
+if (!require(cowplot)) {
+  install.packages(cowplot)
+  library(cowplot)
+}
+if (!require(ggthemes)) {
+  install.packages(ggthemes)
+  library(ggthemes)
+}
+if (!require(readxl)) {
+  install.packages(readxl)
+  library(readxl)
+}
+if (!require(readr)) {
+  install.packages(readr)
+  library(readr)
+}
+if (!require(GGally)) {
+  install.packages(GGally)
+  library(GGally)
+}
+
+
+Lucas_theme<-theme(panel.background = element_blank(),
+                   panel.border = element_blank(),
+                   panel.grid.major = element_blank(),
+                   panel.grid.minor = element_blank(),
+                   axis.line = element_line(colour = "black"))
+crimes <- readRDS("data/chicago_crimes_2001_to_2022.rds")
+crimes<-crimes %>% 
+  mutate(district = recode(district, '16' = "016"))%>%
+  mutate(district = as.integer(district))
+
+zip_chicago <- st_read(here("data/Boundaries - Community Areas (current)"), as_tibble = TRUE)
+order_zip <-crimes%>%
+  mutate(area_numbe = district)
+zip_chicago <- zip_chicago%>%
+  select(area_numbe, community)%>%
+  mutate(area_numbe = as.integer(area_numbe))
+
+
+zip_crimes <- zip_chicago %>% 
+  left_join(order_zip, by = "area_numbe")
+
+
+
+bounding_box <- osmdata::getbb("Chicago")
+chi_map <- ggmap::get_map(bounding_box, maptype = "terrain", source = "stamen", color = "bw")
+
+
+
+```
+
+### Was sind die häufigsten begangenen Arten von Straftaten in 2022 und wo ordnen sich Mordfälle in dieser Liste ein?
+
+```{r}
+#| label: fig-1
+#| fig-cap: "Die Häufigsten Strafttaten in 2020, im Vergleich mit Mord, pro 100000 Einwohner."
+#| fig-width: 10
+#| fig-height: 6
+#| echo: false
+#| warning: false
+crimes%>%
+  filter(year== 2022)%>%
+  select(primary_type)%>%
+  mutate(primary_type = factor(primary_type))%>%
+  count(primary_type, sort= TRUE)%>%
+  mutate(n = n/27)%>%
+  filter(primary_type %in% c("THEFT", "BATTERY", "CRIMINAL DAMAGE", "NARCOTICS", "HOMICIDE"))%>%
+  mutate(primary_type = factor(primary_type, levels = c("THEFT", "BATTERY", "CRIMINAL DAMAGE", "NARCOTICS", "HOMICIDE")))%>%
+  ggplot(aes(y=primary_type, x= n, fill = primary_type))+
+  geom_col()+
+  coord_cartesian(expand = FALSE)+
+  labs(x="Anzahl der Straftaten auf 100000 Einwohner  ",
+       y="Straftaten  ",
+       # caption = "---"
+  )+
+  theme(legend.position="none")+
+  Lucas_theme
+```
+
+Die häufigsten Straftaten in Chicago im Jahr 2022 sind wie in @fig-1 zu sehen Diebstahl, Körperverletzung, Sachbeschädigung und Drogendelikte. Im Vergleich dazu gibt es wenige Morde an der Anzahl gemessen.
+
+### Wie viele Mordfälle gab es in dem gesamten Zeitraum des Datensatzes pro Jahr?
+
+```{r}
+#| label: fig-2
+#| fig-cap: "Zeitlicher Verlauf von Morden in Chicago. A zeigt die Anzahl der Morde pro Jahr. B zeigt die Differenz zum langjährigen Mittel pro Jahr."
+#| fig-width: 10
+#| fig-height: 6
+#| echo: false
+#| warning: false
+aa<-crimes %>% 
+  select(primary_type, year)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  count(year)%>%
+  mutate(mean = mean(n))%>%
+  mutate(diff = n- mean)%>%
+  mutate(pos = case_when(diff > 0~ TRUE,1 == 1 ~ FALSE))%>%
+  ggplot(aes(x= year, y= diff, fill = pos))+
+  geom_col()+
+  labs(x="Jahre [a]",
+       y="Differenz zum Langjährigemmittel  ",
+        title = "B"
+  )+
+  theme(legend.position="none")+
+  scale_fill_manual(name= "Ausschlag", labels = c("negativ", "positiv"), values = c("#008B00", "#EE0000"))+
+  Lucas_theme
+bb<-crimes %>% 
+  select(primary_type, year)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  count(year)%>%
+  ggplot(aes(x = year, y = n))+
+  geom_line()+
+  coord_cartesian(ylim= c(0,900))+
+  labs(x="Jahre [a]",
+       y="Morde  ",
+       title = "A"
+  )+
+  Lucas_theme
+grid.arrange(bb,aa,ncol=1, nrow =2)
+#https://stackoverflow.com/questions/55680449/ggplot-filled-barplot-with-percentage-labels
+
+```
+
+Die Anzahl an Morden ist innerhalb der letzten Jahre zurückgegangen. Doch seit dem Jahr 2016 gibt es wieder einen Anstieg an Morden.
+
+### Welche Straftat hat die niedrigste Festnahmerate, welche die höchste?
+
+```{r}
+#| label: fig-3 
+#| fig-cap: "Übersicht der Straftaten mit der höchsten und der niedrigsten Festnahmesqoute. "
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+crimes %>%
+  select(primary_type, arrest)%>%
+  add_count(primary_type)%>%
+  filter(n > 10000)%>%
+  select(primary_type, arrest)%>%
+  filter(primary_type != "OTHER OFFENSE")%>%
+  filter(primary_type %in% c("PROSTITUTION", "NARCOTICS", "GAMBLING", "BURGLARY", "CRIMINAL DAMAGE", "MOTOR VEHICLE THEFT"))%>%
+  mutate(primary_type = factor(primary_type,levels = c("PROSTITUTION", "NARCOTICS", "GAMBLING", "BURGLARY", "CRIMINAL DAMAGE", "MOTOR VEHICLE THEFT")))%>%
+  ggplot(aes(y=primary_type, fill = arrest))+
+  geom_bar(position="fill") +
+  scale_x_continuous(labels = percent) +
+  scale_fill_manual(name= "Festnahme", labels = c("nein", "ja"), values = c( "#EE0000", "#008B00"))+
+  labs(x="Verhältniss Festnahme/ keine Festnahme",
+       y="Straftat  "
+  )+
+  coord_cartesian(expand = FALSE)+
+  Lucas_theme
+#https://stackoverflow.com/questions/55680449/ggplot-filled-barplot-with-percentage-labels
+```
+
+Bei der Festnahmerate gibt es große Unterschiede zwischen den Straftaten. Die in @fig-3 gezeigten Straftaten haben jeweils die höchsten /niedrigsten Festnahmequouten. Vermutlich ist der Unterschied der Festnahme darauf zurück zuführen das bei z.b. "MOTOR VEHICLE THEFT" die Anzeige gegen Unbekannt gestellt wird. Während bei z.b. "GAMBLING" die Straftat vor Ort festgestellt werden und dann direkt eine Verhaftung durchgeführt wird.
+
+### Wie ist die Festnahmerate bei Mordfällen insgesamt und in jedem Jahr?
+
+```{r}
+#| label: fig-4
+#| fig-cap: "A zeigt die Festnahmerate bei Mord, insgesammt bei allen Jahren.B zeigt die Festnahmerate bei Mord und allen Jahren."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+
+a<-crimes %>%
+  select(primary_type, arrest)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  ggplot(aes(x=primary_type, fill = arrest))+
+  geom_bar(position="fill") +
+  scale_y_continuous(labels = percent) +
+  geom_text(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..], label=percent(..count../tapply(..count.., ..x.. ,sum)[..x..]) ),
+            stat="count", position=position_fill(0.5), vjust=0.5)+ 
+  scale_fill_manual(name= "Festnahme", labels = c("nein", "ja"), values = c( "#EE0000", "#008B00"))+
+  theme(legend.position = "none")+
+  labs(y="Verhältniss Festnahme/ keine Festnahme",
+       x="Straftat",
+       title = "A"
+  )+
+  Lucas_theme
+#https://stackoverflow.com/questions/55680449/ggplot-filled-barplot-with-percentage-labels
+
+
+
+
+
+# Stacked
+b<-crimes%>%
+  select(primary_type, year, arrest)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  add_count(year)%>%
+  ggplot(aes(fill=arrest,  y=n ,x=year)) + 
+    geom_bar(orientation = "x", stat="identity")+
+  scale_y_continuous(labels = label_number())+
+  coord_cartesian(expand= FALSE)+
+  scale_fill_manual(name= "Festnahme", labels = c("nein", "ja"), values = c( "#EE0000", "#008B00"))+
+  labs(y="Morde  ",
+       x="Jahr [a]",
+     title = "B"
+  )+
+  Lucas_theme
+
+
+arrange_ab<-grid.arrange(a+Lucas_theme,b+Lucas_theme,ncol=2, nrow =1)
+
+```
+
+Bei Mord sieht die Sache anders aus. Dort ist die Festnahmerate insgesammt knapp unter 50%. In den Letzten Jahren hat sie sich reduziert.
+
+### Wie ist die Häufigkeit der Mordfälle prozentual im Durchschnitt über die Monate im gesamten Zeitraum verteilt?
+
+```{r}
+#| label: fig-5
+#| fig-cap: "Darstellung der Verteilung von Morden über das Jahr."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+crimes%>%
+  filter(primary_type == "HOMICIDE")%>%
+  mutate(month = month(date))%>%
+  add_count(month)%>%
+  select(month, n)%>%
+  distinct(month,n , .keep_all = TRUE)%>%
+  mutate(Percentage = n/sum(n))%>%
+  ggplot(aes(x= month,y=Percentage, fill = n))+
+  geom_col()+
+  scale_y_continuous(labels = percent) +
+  labs(y="Anteil an Morden",
+       x="Monat [m]",
+  )+
+  coord_cartesian(expand = FALSE)+
+  scale_fill_continuous(name= "Absulute Anzahl\nMorde  ")+
+  scale_x_continuous(breaks = seq(from =1, to = 12))+
+  Lucas_theme
+
+```
+
+Die Mordfälle sind ungleich über die Monate verteilt. Die Verteilung ist um einen Monat versetzt mit der [Temperatur](https://www.google.com/search?q=wette+chicago+jahr) correlierend. Dabei geschehen je wärmer der Monat mehr Morde.
+
+### Welche Polizeireviere (police districts) haben prozentual die meisten Mordfälle in den Abend- und Nachstunden zu verzeichnen und sollten vielleicht deshalb die Nachtschicht verstärken?
+
+```{r}
+#| label: fig-6
+#| fig-cap: "Polizeireviere bei welchen die meisten Morde Nachts geschehen."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+zip_crimes%>%
+  filter(primary_type == "HOMICIDE")%>%
+  mutate(date = hour(date))%>%
+  arrange(district)%>%
+  filter(district %in% c("12", "14", "18", "25"))%>%
+  mutate(nachts = case_when(date %in% c(21,22,23,24,1,2,3,4,5,6)~ TRUE,1 == 1 ~ FALSE))%>%
+  ggplot(aes(y=community, fill = nachts))+
+  geom_bar(position="fill") +
+  scale_x_continuous(labels = percent) +
+  geom_text(aes( x=..count../tapply(..count.., ..y.. ,sum)[..y..], label=percent(..count../tapply(..count.., ..y.. ,sum)[..y..]) ),
+            stat="count", position=position_fill(0.5), vjust=0.5)+
+  labs(y="Distrikt  ",
+       x="Verhältniss Tagsüber/ Nachts",
+       # caption = "---"
+  )+
+  coord_cartesian(expand = FALSE)+
+  scale_fill_manual(name= "Tageszeit  ", labels = c("Tagsüber", "Nachts"), values = c("#FFB90F", "#6495ED"))+
+  Lucas_theme
+
+```
+
+Die meisten Morde in Chicago geschehen Tagsüber. Doch in 4 Distikten, wie in @fig-6 zu sehen, geschehen mehr Morde Nachts. Doch die Verteilung ist nahe 50 % deswegen sollten Polizeistreifen regelmäßg ablaufen und nicht fokusiert auf die Nacht.
+
+### Welche Top 10 Straßen in Chicago haben eine besonders hohe Anzahl an Straftaten zu verzeichnen?
+
+```{r}
+#| label: fig-7
+#| fig-cap: "Top 10 Straßen mit den meisten Straftaten."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+crimes%>%
+  mutate(block = str_sub(block, 8, -1))%>%
+  add_count(block, sort = TRUE)%>%
+  filter(n > 58200)%>%
+  mutate(block = factor(block, levels= c(" STATE ST"  ,                 
+                         " MICHIGAN AVE"           ,    
+                         " HALSTED ST"             ,    
+                         " ASHLAND AVE"             ,   
+                         " WESTERN AVE"              ,  
+                         " MADISON ST"                , 
+                         " PULASKI RD"                 ,
+                         " CLARK ST"                   ,
+                         " DR MARTIN LUTHER KING JR DR",
+                         " KEDZIE AVE")))%>%
+  ggplot(aes(y= block, fill= n))+
+  geom_bar(orientation = "y")+
+  labs(y="Straßen  ",
+       x="Straftaten  ",
+       # caption = "---"
+  )+
+  theme(legend.position = "none")+
+  coord_cartesian(expand = FALSE)+
+  scale_x_continuous(labels = label_number())+
+  Lucas_theme
+```
+
+Bei der Wahl eines Wohnortes sollte man sich von den in @fig-7 genannten Straßen fernhalten. In diesen passieren Statistisch gesehen die meisten Straftaten.
+
+### Erstellt einen Vergleich zwischen der Entwicklung unterschiedlicher Arten von Schwerverbrechen mit denen von Tötungsdelikten (homicide).
+
+```{r}
+#| label: fig-8
+#| fig-cap: "Entwicklung von Körperverletzung, Mord, Entführung und Raub über die Jahre. "
+#| fig-width: 10
+#| fig-height: 5
+#| echo: false
+#| warning: false
+
+Hom<-crimes%>%
+  select(primary_type, year)%>%
+  add_count(year, primary_type, sort = F)%>%
+  distinct(year, n, primary_type)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  mutate(nn= n/645)
+Bat<-crimes%>%
+  select(primary_type, year)%>%
+  add_count(year, primary_type, sort = F)%>%
+  distinct(year, n, primary_type)%>%
+  filter(primary_type == "BATTERY")%>%
+  mutate(nn= n/93457)
+Rob<-crimes%>%
+  select(primary_type, year)%>%
+  add_count(year, primary_type, sort = F)%>%
+  distinct(year, n, primary_type)%>%
+  filter(primary_type == "ROBBERY")%>%
+  mutate(nn= n/18441)
+Kid<-crimes%>%
+  select(primary_type, year)%>%
+  add_count(year, primary_type, sort = F)%>%
+  distinct(year, n, primary_type)%>%
+  filter(primary_type == "KIDNAPPING")%>%
+  mutate(nn= n/933)
+ Hom %>% 
+  full_join(Bat)%>%
+   full_join(Rob)%>%
+   full_join(Kid)%>%
+   ggplot(aes(x= year, y= nn, color= primary_type))+
+   geom_line(linewidth = 1)+
+   coord_cartesian(expand = F)+
+   geom_hline(yintercept = 1)+
+   labs(y="Relative Anzahl an Straftaten verglichen mit 2000  ",
+        x="Jahre [a]",
+        # caption = "---"
+   )+
+   scale_color_discrete(name="Straftaten",
+                        labels=c("Körperverletzung", "Mord", "Entführung", "Raub"))+
+   Lucas_theme
+```
+
+Während die Straftaten Körperverltzung, Raub und Entführung in den letzten Jahren zum Teil deutlich abgenommen haben. Befinden sich die Anzahl der Morde mindestens auf gleichem Niveau wie vor 20 Jahren.
+
+### Welche Community Areas haben im Verlauf der letzten 10 Jahre eine besonders positive Entwicklung bei der Bekämpfung schwerer Straftaten genommen?
+
+```{r}
+#| label: fig-9
+#| fig-cap: "Zeitlicher Verlauf der Verbrechenbekämpfung in den 6 Erfolgreichesten Community Areas, gemessen an der Verringerung der Straften zwischen 2012 und 2022."
+#| echo: false
+#| warning: false
+g<-crimes %>% 
+  filter(year >=2012)%>%
+  mutate(community_area = as.numeric(community_area))%>%
+  drop_na()%>%
+  filter(primary_type %in% c("ROBBERY", "HOMICIDE", "BATTERY", "KIDNPPING"))%>%
+  filter(community_area %in% c("25", "67", "68", "43", "23", "49"))%>%
+  group_by(community_area, year, arrest) %>%
+  summarise(n = n()) %>%
+  mutate(interest_prop = n / sum(n)) %>%
+  filter(arrest== FALSE)%>%
+  mutate(community_area = factor(community_area))%>%
+  mutate(interest_prop = interest_prop*100)%>%
+  ggplot(aes(x= n , y= interest_prop, color= community_area))+
+  geom_point(             alpha=0.6,
+                          size=3)+
+  scale_color_discrete(name ="Community Area")+
+  Lucas_theme+
+  labs(title = 'Year: {frame_time}', x = "Straftaten  ", y = 'Festnahmerate [%]') +
+  transition_time(year) +
+  ease_aes('linear')
+
+animate(g, nframes = 200, fps = 20, end_pause = 40,renderer=gifski_renderer("test3.gif"))
+
+#https://r-graph-gallery.com/271-ggplot2-animated-gif-chart-with-gganimate.html
+```
+
+Einige Community Areas haben in den letzten Jahren deutliche Verbesserungen bei der Bekämpfung von Straftaten gemacht. Wie man in @fig-9 sieht, hat bei den gezeigten Community Areas die Anzahl der Straftaten innerhalb der letzten 10 Jahre deutlich abgenommen und die Verhaftungsquote hat zugenommen.
+
+### Spielen sich mehr Mordfälle in Gebäuden oder im Freien ab? Gibt es saisonale Unterschiede?
+
+```{r}
+#| label: fig-10
+#| fig-cap: "Vergleich der Straftaten die Draußen und die Drinnen stattgefunden haben. Verglichen wurden top ten Orte mit den meisten Straftaten."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+
+crimes%>%
+  select("location_description", date)%>%
+  mutate(months = month(date))%>%
+  filter(location_description != "OTHER")%>%
+  mutate(location_description=factor(location_description) )%>%
+  add_count(location_description, sort = TRUE)%>%
+  filter(n > 41890)%>%
+  mutate(outdoor_crimes = case_when(location_description %in% 
+                                      c("STREET", "SIDEWALK", "PARKING LOT/GARAGE(NON.RESID.)", "ALLEY", "RESIDENCE PORCH/HALLWAY", "VEHICLE NON-COMMERCIAL",  "RESIDENTIAL YARD (FRONT/BACK)", "PARK PROPERTY", "CHA PARKING LOT/GROUNDS")
+                                    ~ TRUE,1 == 1 ~ FALSE))%>%
+  ggplot(aes(x= months, fill= outdoor_crimes))+
+  geom_bar(position="fill") +
+  scale_y_continuous(labels = percent) +
+  scale_x_continuous(breaks = seq(from =1, to = 12))+
+  geom_text(aes( y=..count../tapply(..count.., ..x.. ,sum)[..x..], label=percent(..count../tapply(..count.., ..x.. ,sum)[..x..]) ),
+            stat="count", position=position_fill(0.5), vjust=0.5, angle = 90)+
+  labs(y="Verteilung der Straftaten",
+       x="Monate",
+       # caption = "---"
+  )+
+  coord_cartesian(expand = FALSE)+
+  scale_fill_manual(name= "Ort", labels = c("Drinnen", "Draußen"), values = c( "#87CEEB", "#7CCD7C"))+
+  Lucas_theme
+```
+
+Ähnlich wie bei @fig-5 gibt es einen zusammenhang zwischen den Monaten/ der Temperatur und der Anzahl der Straftaten in @fig-10.
+
+### Wie ist die Verteilung der Zeitabstände zwischen Mordfällen in den verschiedenen Community Areas im Vergleich? Gibt es hier Auffälligkeiten?
+
+```{r}
+#| label: fig-11
+#| fig-cap: "Zeitlichen Abstand zwischen Morden exemplarisch bei mehren Community Areas. Wenn kein Mord geschied, steigt der Zähler für den Abstand zwischen den Morden an."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+
+a<-tibble(date = rep(seq(as.Date("2001-01-01"), as.Date("2022-12-22"), by=1), 77),
+          community_area = rep(seq(1,77), each= 8026))
+
+b<-crimes%>%
+  mutate(community_area = as.numeric(community_area))%>%
+  select(community_area, primary_type, date, year)%>%
+  filter(primary_type== "HOMICIDE")%>%
+  distinct(community_area, date, primary_type)%>%
+  full_join(a)
+animate<-b%>%
+  arrange(date)%>%
+  filter(community_area %in% c( 71,  1, 6))%>%
+  filter(date >  "2010-01-01 00:00:00" )%>%
+  mutate(primary_type = case_when(primary_type == "HOMICIDE" ~T, 1==1~F))%>%
+  group_by(community_area)%>%
+  mutate(primary_type = as.character(primary_type))%>%
+  mutate(a1 = case_when(primary_type == "TRUE" ~ 1, primary_type == "FALSE" ~ 0))%>%
+  mutate(mord_anzahl = cumsum(a1))%>%
+  arrange(primary_type)%>%
+  ungroup()%>%
+  group_by(community_area, mord_anzahl)%>%
+  mutate(abstand = case_when(primary_type == "TRUE" ~ 0, primary_type == "FALSE" ~1))%>%
+  mutate(abstand1 = case_when(abstand == 1~ cumsum(abstand), 1==1 ~0))%>%
+  mutate(community_area = factor(community_area))%>%
+  mutate(sum = sum(abstand1))%>%
+  ungroup()%>%
+  group_by(community_area)%>%
+  arrange(desc(sum))%>%
+  ggplot(aes(y = abstand1, x= date, color= community_area))+
+  geom_line(linewidth = 1)+
+  scale_color_discrete(name="community_area")+
+  coord_cartesian(expand = FALSE)+
+  Lucas_theme+
+  labs(y= "Abstand seit letztem Mord [d]",
+       x= "Datum  [d]")
+
+animate +geom_point()+
+  transition_reveal(date)
+```
+
+Die zeitliche Verteilung der Morde ist auch relevant. Während einige Community Areas Jahre ohne einen Mord haben, geschehen in anderen Community Areas regelmäßig Morde. In Community Area 6 gibt es Beispeilsweise viel Zeit zwischen den Morden, zu sehen in @fig-11. Es lässt sich in Community Area 6 ein Muster erkennen, nach dem es lange (\>500 Tage) zu keinem Mord gekommen ist, geschehen dannach mehrere Morde in kurzer Zeit. In Community Area 71 dauert es nie lange bis der nächste Mord geschied.
+
+### Zu welchen Uhrzeiten sollte man an welchen Orten besonders vorsichtig sein?
+
+```{r}
+#| label: fig-12
+#| fig-cap: "Straftatenhäufigkeit über den Tag, bei einigen Orten."
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+crimes%>%
+  select(location_description, primary_type, date)%>%
+  mutate(hours = hour(date))%>%
+  filter(location_description %in% c( "SCHOOL, PUBLIC, BUILDING", "SCHOOL, PUBLIC, GROUNDS",
+                                      "BAR OR TAVERN", "BANK", "CTA BUS", "STREET" ))%>%
+  add_count(location_description, hours)%>%
+  ggplot()+
+  aes(x= hours, y= location_description, fill= stat(x)) +
+  geom_density_ridges_gradient(scale = 3, size = 0.3, rel_min_height = 0.01) +
+  scale_fill_gradient2(name = "Tageszeit", low = muted("blue"), mid = "yellow", high = muted("blue"),midpoint = 12 ) +
+  Lucas_theme+
+labs(x= "Uhrzeit [h]",
+     y= "Ort")+
+  coord_cartesian( xlim = c(0, 24))+
+  theme_minimal()
+  
+  
+```
+
+Statistisch gesehen gibt es Uhrzeiten an denen an bestimmten Orten mehr Straftaten geschehen. So kommt es in öffentlichen Schulen Nachmittags zu den meisten Straftaten, morgens geht es dort friedlich zu. In Kneipen kommt es nach 20 Uhr bis um 4 zu vielen Straftaten. Banken haben zwar den Hotspot für Straftaten Mittags, doch es kommt rund um Mitternacht zu vielen Straftaten, dies kann daran liegn das dort die meisten Überfälle geschehen.
+
+Insgesammt lässt sich dazu sagen das es deutliche Muster gibt wo man Straftaten erwarten kann. Dementsprechend sollte man das Sicherheitskonzept darauf hin anpassen.
+
+### In welchen Community Areas der Stadt Chicago wurden in 2022 die meisten Mordfälle aufgenommen? Stellt die Analyse auch in den Zusammenhang zur Einwohnerzahl der Community Areas!
+
+```{r}
+#| label: fig-13
+#| fig-cap: "Morde pro 10000 Einwohner im Jahr 2022 für die Distrikte von Chicago"
+#| fig-width: 10
+#| fig-height: 8
+#| echo: false
+#| warning: false
+# Ermitteln der Anzahl Bestellungen pro PLZ-Gebiet
+library(readxl)
+Einwohnerzahl <- read_excel("data/Einwohnerzahl.xlsx")
+
+num_order_zip <-crimes%>%
+  filter(year == 2022)%>%
+  select(primary_type, community_area)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  rename(area_numbe = community_area)%>%
+  add_count(area_numbe)%>%
+  mutate(area_numbe = as.numeric(area_numbe))%>%
+  left_join(Einwohnerzahl, by = "area_numbe")%>%
+  mutate(Population = Population*1000)%>%
+  mutate(nviel = (n/Population)*10000)
+
+
+
+zip_os_with_num_orders <- zip_chicago %>% 
+  left_join(num_order_zip, by = "area_numbe")
+
+
+ggmap(chi_map) +
+  geom_sf(data = zip_os_with_num_orders,
+          mapping = aes(fill = nviel),
+          alpha = 0.5,
+          inherit.aes = FALSE) +
+  scale_fill_distiller(name = "Morde pro 100000 Einwohner", type = "seq", palette = "PuBuGn", direction = 1) +
+  theme_map()
+
+```
+
+Die Hotspot für Morde in Chicago sind West Garf. Park und Fuller Park.
+
+### Gibt es Hotspots in Chicago für Straftaten im Zusammenhang mit Prostitution?
+
+```{r}
+#| label: fig-14
+#| fig-cap: "Hotspots der Prostitution in Chicago. Blau dagestellt sind Ort an welchen Viele Straftaten im Zusammenhang mit Prostitution stattgefunden haben."
+#| fig-width: 10
+#| fig-height: 8
+#| echo: false
+#| warning: false
+prstitution <- crimes%>%
+  filter(primary_type == "PROSTITUTION")
+ggmap(chi_map) +
+  labs(x = "longitude", y = "latitude") +
+  geom_point(data = prstitution,
+             mapping = 
+               aes(x = longitude, 
+                   y = latitude),
+             alpha = 0.01,
+             color = "#009ee3"
+  ) +
+  theme_map()
+
+```
+
+Prostitution ist in den Vereinigten Staaten von Amerika auf Bundesebene illegal, und das gilt auch für Chicago.
+
+Die meisten Fälle von Prostitution befinden um den Kern Chicago. Doch die Strataten sind dabei nicht auf einzelne Centren konzentriert, sondern ehr großflächig.
+
+### 
+
+In der Wissenschaft gibt es Untersuchungen zu der Frage, ob es einen Zusammenhang zwischen Gewaltverbrechen und dem Wetter gibt. Konkret wurde ein positiver Zusammenhang zwischen Hitze und einer größeren Gewaltbereitschaft postuliert. Untersucht diesen Zusammenhang im vorliegenden Datensatz!
+
+```{r}
+#| label: fig-15
+#| fig-cap: "Korrelation zwischen der Temperatur und Gewaltstraftaten."
+#| fig-width: 10
+#| fig-height: 5
+#| echo: false
+#| warning: false
+Wetterundso <- read_csv("data/Wetterundso.csv")
+
+crimes%>%
+  select(year, date, primary_type)%>%
+  filter(year >=2013 )%>%
+  filter(primary_type == "BATTERY")%>%
+  mutate(month = month(date))%>%
+  mutate(day = day(date))%>%
+  mutate(hour = hour(date))%>%
+  add_count(primary_type, month, day, hour, year)%>%
+  left_join(Wetterundso)%>%
+  select(hourly_dry_bulb_temperature, n)%>%
+  rename(Gewaltstraftaten = n)%>%
+  rename(Temperatur = hourly_dry_bulb_temperature)%>%
+  ggpairs(columns = 1:2,aes(alpha = 0.5))
+```
+
+In den vorliegenden Daten lässt sich keine relevante Verbindung von Temperatur und der Anzahl von Gewaltstraftaten erstellen. Eine Correlation von 0.229 ist wenig aussagekräftig. Die Temperatur Daten wurden von [NOAA](https://www.ncdc.noaa.gov/cdo-web/datasets/LCD/stations/WBAN:94846/detail) erhalten.
+
+### Sucht in den Daten nach besonders auffälligen Tagen und recherchiert, was zu der Auffälligkeit geführt hat!
+
+```{r}
+#| label: fig-16
+#| fig-cap: "Darstellung der Morde pro Tag,zwischen 2001 und 2022. Rot hervorgehoben ist der 31 Mai 2020 mit 18 Morden. "
+#| fig-width: 10
+#| fig-height: 3
+#| echo: false
+#| warning: false
+crimes%>%
+  select(primary_type, date)%>%
+  filter(primary_type == "HOMICIDE")%>%
+  mutate(days = floor_date(date, unit = "days"))%>%
+  add_count(days)%>%
+  distinct(days, n, primary_type)%>%
+  mutate(primary_type_fact  = case_when(n == 18 ~T, 1 == 1 ~F))%>%
+  ggplot(aes(x= days,  y= n,color= primary_type_fact))+
+    geom_col()+
+  coord_cartesian(expand = FALSE)+
+  labs(x= "Datum [d]",
+       y= "Anzahl an Morden")+
+  theme(legend.position = "none")+
+  scale_color_manual(name= "Ausschlag", labels = c("negativ", "positiv"), values = c("#000000", "#FF0000"))+
+  Lucas_theme
+  
+
+#https://en.wikipedia.org/wiki/George_Floyd_protests_in_Chicago
+```
+
+Die George Floyd Proteste in Chicago waren Teil der weltweiten Proteste, die nach dem Tod von George Floyd stattfanden. Floyd war ein Afroamerikaner, der von einem Polizisten erstickt wurde, während er festgehalten wurde. Sein Tod führte zu einer Welle von Protesten gegen Polizeigewalt und Rassismus in den USA und auf der ganzen Welt.
+
+In Chicago fanden die Proteste in den Tagen nach Floyds Tod statt und zogen Tausende von Menschen an. Die Demonstranten forderten Gerechtigkeit für Floyd und andere, die Opfer von Polizeigewalt geworden waren. Sie forderten auch Reformen bei der Polizei und mehr Gleichheit für alle Menschen unabhängig der Hautfarbe.
+
+Am 31 Mai 2020 kam es zu weitreichenden Ausschreitungen. Die Illinois National Guard wurde nach Chicago verlegt. Im Rahmen der Unruhen kam es zu weitreichenden Sachschäden, Plünderungen und zu dem Tot von 18 Menschen die im Rahmen der Proteste umkamen. Dies ist mit Abstand die höchste Zahl an Menschen die im Zeitraum zwischen 2001 und 2022 an einem Tag ermordet wurden. Dies spiegelt sich in @fig-15 wieder. [^1]
+
+[^1]: https://en.wikipedia.org/wiki/George_Floyd_protests_in_Chicago
+
+Benutzte Hilfsmittel:
+
+[Openai Chatbot](https://chat.openai.com/chat)
+
+[The R Graph Gallery](https://r-graph-gallery.com/)
+
+[Stackoverflow](https://stackoverflow.com/)
+
+[NOAA](https://www.ncdc.noaa.gov/cdo-web/datasets/LCD/stations/WBAN:94846/detail)
+
+[Quarto Documentation](https://quarto.org/)
